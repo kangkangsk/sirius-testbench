@@ -1,0 +1,142 @@
+@media (max-width: 1280px) {
+  .content-grid-2,
+  .content-grid-main-side,
+  .content-grid-equal,
+  .create-grid,
+  .detail-grid,
+  .workbench-grid,
+  .message-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .detail-info-grid {
+    column-gap: 24px;
+  }
+}
+
+@media (max-width: 992px) {
+  .layout-header,
+  .app-header {
+    min-height: 64px;
+    padding: 12px 16px;
+  }
+
+  .layout-sider,
+  .app-sider {
+    top: auto;
+    height: auto;
+  }
+
+  .layout-tabs,
+  .tab-strip {
+    top: auto;
+  }
+
+  .layout-title,
+  .system-title {
+    font-size: 22px !important;
+  }
+
+  .layout-tabs,
+  .tab-strip {
+    overflow-x: auto;
+  }
+
+  .page-shell,
+  .app-content {
+    padding: 16px;
+  }
+
+  .metric-grid,
+  .monitor-card-grid {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .layout-header,
+  .app-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .header-actions > .ant-btn,
+  .header-actions > .ant-badge {
+    display: none;
+  }
+
+  .layout-title,
+  .system-title {
+    font-size: 18px !important;
+  }
+
+  .page-shell,
+  .app-content {
+    padding: 12px;
+  }
+
+  .section-head,
+  .panel-title,
+  .toolbar-row,
+  .filter-toolbar,
+  .detail-shell__header,
+  .detail-window-head,
+  .detail-footer,
+  .detail-window-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-grid,
+  .capture-form-grid,
+  .metric-grid,
+  .monitor-card-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .metric-card,
+  .monitor-card {
+    min-height: 78px;
+    padding: 12px 14px;
+  }
+
+  .metric-card__art,
+  .monitor-card-art {
+    width: 56px;
+    height: 52px;
+    flex-basis: 56px;
+  }
+
+  .detail-shell,
+  .detail-window {
+    padding: 14px 12px;
+  }
+
+  .detail-shell__tabs,
+  .detail-anchor-tabs {
+    margin: 0 -12px;
+    padding: 0 12px;
+  }
+
+  .detail-info-grid {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 12px;
+  }
+
+  .detail-info-item {
+    grid-template-columns: 96px minmax(0, 1fr);
+    font-size: 13px;
+  }
+
+  .ranking-row {
+    grid-template-columns: 26px minmax(0, 1fr) 36px;
+  }
+
+  .progress-row,
+  .workbench-load-row,
+  .message-rule-row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: flex-start;
+  }
+}

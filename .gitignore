@@ -1,0 +1,8 @@
+/.DS_Store
+node_modules/
+dist/
+workspace/
+workspace.config.json
+playwright-report/
+test-results/
+test-screenshots/

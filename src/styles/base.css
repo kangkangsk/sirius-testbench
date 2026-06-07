@@ -1,0 +1,175 @@
+:root {
+  --demo-bg: #f5f7fb;
+  --demo-surface: #ffffff;
+  --demo-surface-soft: #f8fbff;
+  --demo-fill: #eef3f8;
+  --demo-border: #dfe7f1;
+  --demo-border-strong: #cfdae7;
+  --demo-text: #202a36;
+  --demo-text-secondary: #6e7f92;
+  --demo-primary: #2f7df6;
+  --demo-primary-dark: #1d6df0;
+  --demo-success: #2ca55f;
+  --demo-warning: #f59e0b;
+  --demo-danger: #e5484d;
+  --demo-info: #7d8a99;
+  --demo-radius-sm: 6px;
+  --demo-radius-md: 7px;
+  --demo-radius-lg: 10px;
+  --demo-shadow-soft: 0 8px 24px rgba(28, 63, 113, 0.08);
+  --demo-shadow-hover: 0 12px 28px rgba(47, 125, 246, 0.14);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root,
+#app {
+  height: 100%;
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  overflow: hidden;
+  background: var(--demo-bg);
+  color: var(--demo-text);
+  font-family: "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+}
+
+a {
+  color: inherit;
+}
+
+code {
+  padding: 1px 6px;
+  border: 1px solid var(--demo-border);
+  border-radius: 4px;
+  background: #eff4fb;
+  color: #35506d;
+}
+
+.full-width {
+  width: 100%;
+}
+
+.is-scroll-y {
+  overflow-y: auto;
+}
+
+.is-scroll-x {
+  overflow-x: auto;
+}
+
+.ant-app,
+.ant-typography {
+  color: var(--demo-text);
+}
+
+.ant-card,
+.panel-card,
+.table-card,
+.chart-card,
+.detail-card,
+.theme-card,
+.work-panel {
+  border: 1px solid var(--demo-border);
+  border-radius: var(--demo-radius-md);
+  background: var(--demo-surface);
+  box-shadow: 0 1px 2px rgba(23, 44, 76, 0.03);
+}
+
+.ant-card .ant-card-head,
+.panel-card .ant-card-head,
+.table-card .ant-card-head,
+.chart-card .ant-card-head,
+.detail-card .ant-card-head {
+  min-height: 50px;
+  padding: 0 15px;
+  border-bottom-color: #e9eef5;
+}
+
+.ant-card .ant-card-body,
+.panel-card .ant-card-body,
+.table-card .ant-card-body,
+.chart-card .ant-card-body,
+.detail-card .ant-card-body {
+  padding: 14px 16px;
+}
+
+.ant-btn {
+  border-radius: var(--demo-radius-sm);
+  box-shadow: none;
+}
+
+.ant-btn-primary {
+  border-color: var(--demo-primary);
+  background: var(--demo-primary);
+}
+
+.ant-btn-primary:hover,
+.ant-btn-primary:focus {
+  border-color: var(--demo-primary-dark) !important;
+  background: var(--demo-primary-dark) !important;
+}
+
+.ant-input,
+.ant-picker,
+.ant-select .ant-select-selector,
+.ant-input-number,
+.ant-input-number-group-addon,
+.ant-input-number-affix-wrapper {
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+.ant-input,
+.ant-picker,
+.ant-select-single .ant-select-selector,
+.ant-select-multiple .ant-select-selector,
+.ant-input-number,
+.ant-input-number-input {
+  min-height: 36px;
+  background: var(--demo-fill) !important;
+}
+
+.ant-select-multiple .ant-select-selector {
+  align-items: center;
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+}
+
+.ant-select-multiple .ant-select-selection-overflow {
+  min-height: 28px;
+  align-items: center;
+}
+
+.ant-input::placeholder,
+.ant-select-selection-placeholder {
+  color: #9aa8b8 !important;
+}
+
+.ant-form-item-label > label {
+  color: var(--demo-text) !important;
+  font-size: 13px;
+}
+
+.ant-table-wrapper {
+  overflow: hidden;
+}
+
+.ant-table-thead > tr > th {
+  background: #f5f8fc !important;
+  color: var(--demo-text) !important;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ant-table-tbody > tr > td {
+  color: #4d6074;
+  font-size: 13px;
+}
