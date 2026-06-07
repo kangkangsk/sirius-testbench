@@ -1,7 +1,7 @@
 # Sirius 自动化测试工作台
 
 <p align="center">
-  <img src="docs/assets/sirius-logo.svg" width="112" alt="Sirius 自动化测试工作台 Logo" />
+  <img src="docs/assets/sirius-logo.png" width="112" alt="Sirius 自动化测试工作台 Logo" />
 </p>
 
 <p align="center">

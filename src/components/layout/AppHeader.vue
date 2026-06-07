@@ -38,7 +38,7 @@ import {
   SettingOutlined,
   UserOutlined,
 } from '@ant-design/icons-vue';
-import siriusLogoUrl from '../../../docs/assets/sirius-logo.svg?url';
+import siriusLogoUrl from '../../../docs/assets/sirius-logo.png?url';
 
 defineProps({
   projectName: { type: String, required: true },

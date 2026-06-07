@@ -41,10 +41,10 @@
 .sirius-logo {
   display: block;
   flex: 0 0 auto;
-  width: 42px;
-  height: 42px;
+  width: 52px;
+  height: 52px;
   object-fit: contain;
-  filter: drop-shadow(0 8px 16px rgba(23, 105, 215, 0.18));
+  filter: drop-shadow(0 7px 12px rgba(18, 103, 220, 0.2));
 }
 
 .brand-mark span {
