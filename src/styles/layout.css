@@ -39,50 +39,12 @@
 }
 
 .sirius-logo {
-  position: relative;
-  display: grid;
+  display: block;
   flex: 0 0 auto;
   width: 42px;
   height: 42px;
-  place-items: center;
-  overflow: hidden;
-  border: 1px solid rgba(23, 105, 170, 0.32);
-  border-radius: 12px;
-  background:
-    radial-gradient(circle at 68% 24%, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0) 20%),
-    linear-gradient(145deg, #eaf6ff 0%, #d9efff 45%, #f8fbff 100%);
-  box-shadow: 0 8px 18px rgba(23, 105, 170, 0.14);
-}
-
-.sirius-logo__core {
-  position: relative;
-  z-index: 2;
-  color: #1769aa;
-  font-size: 22px;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.sirius-logo__orbit {
-  position: absolute;
-  width: 54px;
-  height: 18px;
-  border: 2px solid rgba(23, 105, 170, 0.46);
-  border-right-color: transparent;
-  border-left-color: transparent;
-  border-radius: 50%;
-  transform: rotate(-28deg);
-}
-
-.sirius-logo__star {
-  position: absolute;
-  top: 8px;
-  right: 9px;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #1f8cff;
-  box-shadow: 0 0 0 3px rgba(31, 140, 255, 0.16);
+  object-fit: contain;
+  filter: drop-shadow(0 8px 16px rgba(23, 105, 215, 0.18));
 }
 
 .brand-mark span {

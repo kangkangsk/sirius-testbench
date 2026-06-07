@@ -1,11 +1,7 @@
 <template>
   <header class="app-header">
     <div class="brand-block">
-      <div class="sirius-logo" aria-label="Sirius">
-        <span class="sirius-logo__core">S</span>
-        <span class="sirius-logo__orbit" />
-        <span class="sirius-logo__star" />
-      </div>
+      <img class="sirius-logo" :src="siriusLogoUrl" alt="Sirius" />
       <div>
         <a-typography-title :level="3" class="system-title">{{ projectName }}</a-typography-title>
         <a-typography-text type="secondary" class="system-subtitle">{{ activeLabel }}</a-typography-text>
@@ -42,6 +38,7 @@ import {
   SettingOutlined,
   UserOutlined,
 } from '@ant-design/icons-vue';
+import siriusLogoUrl from '../../../docs/assets/sirius-logo.svg?url';
 
 defineProps({
   projectName: { type: String, required: true },
