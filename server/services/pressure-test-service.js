@@ -1,6 +1,60 @@
 const DEFAULT_PRESSURE_TIMEOUT_MS = 10000;
+const PROMETHEUS_TIMEOUT_MS = 10000;
 const MAX_SAMPLES = 300;
 const MAX_ERROR_SAMPLES = 50;
+
+const RESOURCE_METRIC_DEFINITIONS = {
+  cpu: {
+    label: 'CPU',
+    unit: '%',
+    aggregation: 'avg',
+    query: '100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[1m])) * 100)',
+  },
+  memory: {
+    label: '内存',
+    unit: '%',
+    aggregation: 'avg',
+    query: '(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100',
+  },
+  diskIo: {
+    label: '磁盘 I/O',
+    unit: 'bytes/s',
+    aggregation: 'sum',
+    query: 'sum(rate(node_disk_read_bytes_total[1m])) + sum(rate(node_disk_written_bytes_total[1m]))',
+  },
+  networkIo: {
+    label: '网络 I/O',
+    unit: 'bytes/s',
+    aggregation: 'sum',
+    query: 'sum(rate(node_network_receive_bytes_total[1m])) + sum(rate(node_network_transmit_bytes_total[1m]))',
+  },
+  jvmGc: {
+    label: 'JVM GC',
+    unit: 's/s',
+    aggregation: 'sum',
+    query: 'sum(rate(jvm_gc_pause_seconds_sum[1m]))',
+  },
+  threadCount: {
+    label: '线程数',
+    unit: 'threads',
+    aggregation: 'avg',
+    query: 'jvm_threads_live_threads',
+  },
+  dbConnections: {
+    label: '数据库连接数',
+    unit: 'connections',
+    aggregation: 'avg',
+    query: 'hikaricp_connections_active',
+  },
+  slowSql: {
+    label: '慢 SQL',
+    unit: 'count',
+    aggregation: 'sum',
+    query: 'increase(mysql_global_status_slow_queries[1m])',
+  },
+};
+
+const RESOURCE_METRIC_KEYS = Object.keys(RESOURCE_METRIC_DEFINITIONS);
 
 const sleep = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms);
@@ -179,6 +233,186 @@ const round = (value, digits = 2) => {
   return Math.round(value * factor) / factor;
 };
 
+const byteLength = (value) => Buffer.byteLength(String(value ?? ''), 'utf8');
+
+const objectByteLength = (value) =>
+  Object.entries(value || {}).reduce((total, [key, itemValue]) =>
+    total + byteLength(`${key}: ${itemValue}\r\n`), 0);
+
+const payloadByteLength = (value) => {
+  if (value === undefined || value === null) {
+    return 0;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.length;
+  }
+  if (value instanceof ArrayBuffer) {
+    return value.byteLength;
+  }
+  return byteLength(value);
+};
+
+const estimateSentBytes = (request) => {
+  let pathWithQuery = request.url || '/';
+  try {
+    const parsed = new URL(request.url);
+    pathWithQuery = `${parsed.pathname}${parsed.search}`;
+  } catch (_error) {
+    pathWithQuery = request.url || '/';
+  }
+  return byteLength(`${request.method || 'GET'} ${pathWithQuery} HTTP/1.1\r\n`)
+    + objectByteLength(request.headers || {})
+    + byteLength('\r\n')
+    + payloadByteLength(request.postData);
+};
+
+const responseHeadersObject = (headers) =>
+  Object.fromEntries([...headers.entries()].map(([key, value]) => [key, value]));
+
+const firstHeaderValue = (headers, names) => {
+  const normalized = Object.fromEntries(
+    Object.entries(headers || {}).map(([key, value]) => [key.toLowerCase(), value])
+  );
+  return names.map((name) => normalized[name.toLowerCase()]).find((value) => value !== undefined) || '';
+};
+
+const businessValue = (value) => {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  if (typeof value === 'object') {
+    return JSON.stringify(value).slice(0, 500);
+  }
+  return String(value);
+};
+
+const findBusinessField = (value, names, visited = new Set()) => {
+  if (!value || typeof value !== 'object' || visited.has(value)) {
+    return '';
+  }
+  visited.add(value);
+  const nameSet = new Set(names.map((name) => name.toLowerCase()));
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findBusinessField(item, names, visited);
+      if (found) {
+        return found;
+      }
+    }
+    return '';
+  }
+  for (const [key, itemValue] of Object.entries(value)) {
+    if (nameSet.has(key.toLowerCase())) {
+      return businessValue(itemValue);
+    }
+  }
+  for (const itemValue of Object.values(value)) {
+    const found = findBusinessField(itemValue, names, visited);
+    if (found) {
+      return found;
+    }
+  }
+  return '';
+};
+
+const extractBusinessFields = (responseText, headers = {}) => {
+  let parsed = null;
+  try {
+    parsed = responseText ? JSON.parse(responseText) : null;
+  } catch (_error) {
+    parsed = null;
+  }
+  return {
+    bizCode: findBusinessField(parsed, ['bizCode', 'code', 'errorCode', 'errCode']),
+    bizMessage: findBusinessField(parsed, ['bizMessage', 'message', 'msg', 'errorMessage']),
+    traceId: findBusinessField(parsed, ['traceId', 'traceID', 'trace_id'])
+      || firstHeaderValue(headers, ['trace-id', 'x-trace-id', 'x-request-id', 'request-id']),
+    errorType: findBusinessField(parsed, ['errorType', 'exception', 'exceptionType'])
+      || firstHeaderValue(headers, ['error-type', 'x-error-type']),
+  };
+};
+
+const timestampFromSample = (sample) => {
+  if (Number.isFinite(Number(sample.timeStamp))) {
+    return Number(sample.timeStamp);
+  }
+  const startedAt = new Date(sample.startedAt || 0).getTime();
+  return Number.isFinite(startedAt) ? startedAt : 0;
+};
+
+const jtlFieldsFromResult = (result, config = {}) => {
+  const success = result.success ?? result.ok ?? false;
+  const status = result.responseCode ?? result.status ?? 0;
+  const elapsed = result.elapsed ?? result.durationMs ?? 0;
+  const url = result.URL || result.url || '';
+  const method = result.method || 'HTTP';
+  const label = result.label || `${method} ${url}`.trim();
+  const failureMessage = result.failureMessage || result.error || (success ? '' : result.bizMessage || '');
+  const threads = config.concurrency || result.allThreads || result.grpThreads || 0;
+  return {
+    sequence: result.sequence,
+    requestId: result.requestId,
+    method,
+    url,
+    timeStamp: timestampFromSample(result),
+    elapsed,
+    label,
+    success,
+    responseCode: String(status),
+    responseMessage: result.responseMessage || result.error || '',
+    failureMessage,
+    URL: url,
+    allThreads: result.allThreads ?? threads,
+    grpThreads: result.grpThreads ?? threads,
+    Latency: result.Latency ?? result.latencyMs ?? elapsed,
+    Connect: result.Connect ?? result.connectMs ?? 0,
+    bytes: result.bytes ?? 0,
+    sentBytes: result.sentBytes ?? 0,
+    bizCode: result.bizCode || '',
+    bizMessage: result.bizMessage || '',
+    traceId: result.traceId || '',
+    errorType: result.errorType || '',
+  };
+};
+
+const summarizeValues = (samples) => {
+  const values = samples.map((sample) => sample.value).filter((value) => Number.isFinite(value));
+  if (!values.length) {
+    return { min: 0, max: 0, avg: 0, last: 0 };
+  }
+  const total = values.reduce((sum, value) => sum + value, 0);
+  return {
+    min: round(Math.min(...values)),
+    max: round(Math.max(...values)),
+    avg: round(total / values.length),
+    last: round(values[values.length - 1]),
+  };
+};
+
+const aggregatePrometheusValues = (series, aggregation) => {
+  const buckets = new Map();
+  series.forEach((item) => {
+    (item.values || []).forEach(([timestampSeconds, rawValue]) => {
+      const value = Number(rawValue);
+      if (!Number.isFinite(value)) {
+        return;
+      }
+      const timeStamp = Math.round(Number(timestampSeconds) * 1000);
+      const values = buckets.get(timeStamp) || [];
+      values.push(value);
+      buckets.set(timeStamp, values);
+    });
+  });
+  return [...buckets.entries()]
+    .sort(([first], [second]) => first - second)
+    .map(([timeStamp, values]) => {
+      const value = aggregation === 'sum'
+        ? values.reduce((sum, item) => sum + item, 0)
+        : values.reduce((sum, item) => sum + item, 0) / values.length;
+      return { timeStamp, value: round(value) };
+    });
+};
+
 const emptyStats = (target = null) => ({
   target,
   total: 0,
@@ -190,6 +424,8 @@ const emptyStats = (target = null) => ({
   latencies: [],
   statusCounts: {},
   errorCounts: {},
+  bizCodeCounts: {},
+  errorTypeCounts: {},
 });
 
 const recordStats = (stats, result) => {
@@ -204,6 +440,12 @@ const recordStats = (stats, result) => {
   stats.statusCounts[statusKey] = (stats.statusCounts[statusKey] || 0) + 1;
   if (result.error) {
     stats.errorCounts[result.error] = (stats.errorCounts[result.error] || 0) + 1;
+  }
+  if (result.bizCode) {
+    stats.bizCodeCounts[result.bizCode] = (stats.bizCodeCounts[result.bizCode] || 0) + 1;
+  }
+  if (result.errorType) {
+    stats.errorTypeCounts[result.errorType] = (stats.errorTypeCounts[result.errorType] || 0) + 1;
   }
 };
 
@@ -222,6 +464,8 @@ const summarizeStats = (stats, elapsedSeconds) => ({
   p99DurationMs: percentile(stats.latencies, 0.99),
   statusCounts: stats.statusCounts,
   errorCounts: stats.errorCounts,
+  bizCodeCounts: stats.bizCodeCounts,
+  errorTypeCounts: stats.errorTypeCounts,
 });
 
 const reportSummary = (job, finishedAt = new Date().toISOString()) => {
@@ -247,6 +491,7 @@ const serializeReportSummary = (report) => ({
   startedAt: report.startedAt,
   finishedAt: report.finishedAt,
   config: report.config,
+  monitoring: report.monitoring,
   summary: report.summary,
   reportId: report.reportId,
   reportPath: report.reportPath || '',
@@ -266,6 +511,23 @@ export class PressureTestService {
       timeoutMs: normalizePositiveInt(options.timeoutMs, DEFAULT_PRESSURE_TIMEOUT_MS, 100, 10 * 60 * 1000),
       maxRequests: normalizePositiveInt(options.maxRequests, 0, 0, 10_000_000),
       requestIntervalMs: normalizePositiveInt(options.requestIntervalMs, 0, 0, 60_000),
+    };
+  }
+
+  buildMonitoring(options = {}) {
+    const provider = options.provider === 'prometheus' ? 'prometheus' : 'none';
+    const enabled = options.enabled === true && provider === 'prometheus';
+    const queries = {};
+    RESOURCE_METRIC_KEYS.forEach((key) => {
+      const definition = RESOURCE_METRIC_DEFINITIONS[key];
+      queries[key] = String(options.queries?.[key] || definition.query);
+    });
+    return {
+      enabled,
+      provider,
+      prometheusUrl: String(options.prometheusUrl || '').trim(),
+      stepSeconds: normalizePositiveInt(options.stepSeconds, 15, 1, 3600),
+      queries,
     };
   }
 
@@ -311,6 +573,7 @@ export class PressureTestService {
       sessionId: job.sessionId,
       status: job.status,
       config: job.config,
+      monitoring: job.monitoring,
       authMode: job.authMode,
       authOverride: job.authOverride,
       targets: job.targets,
@@ -320,8 +583,12 @@ export class PressureTestService {
       summary,
       interfaces,
       samples: job.samples,
+      jtlSamples: job.samples.map((sample) => jtlFieldsFromResult(sample, job.config)),
       errors: job.errors,
       timeline: [...job.timeline.values()].sort((first, second) => first.second - second.second),
+      resourceMetrics: job.resourceMetrics || null,
+      unavailableFields: job.unavailableFields || [],
+      fieldLimitations: job.fieldLimitations || this.buildFieldLimitations(job.monitoring, job.resourceMetrics),
       report: job.report,
       reportId: job.reportId || null,
       reportPath: job.reportPath || null,
@@ -339,6 +606,7 @@ export class PressureTestService {
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,
       config: job.config,
+      monitoring: job.monitoring,
       summary,
       reportId: job.reportId || null,
       reportPath: job.reportPath || null,
@@ -353,6 +621,7 @@ export class PressureTestService {
       sessionId: report.sessionId,
       status: report.status || 'completed',
       config: report.config,
+      monitoring: report.monitoring,
       authMode: report.authMode,
       authOverride: report.authOverride,
       targets: report.targets,
@@ -362,8 +631,12 @@ export class PressureTestService {
       summary: report.summary,
       interfaces: report.interfaces,
       samples: report.samples || [],
+      jtlSamples: report.jtlSamples || (report.samples || []).map((sample) => jtlFieldsFromResult(sample, report.config)),
       errors: report.errors || [],
       timeline: report.timeline || [],
+      resourceMetrics: report.resourceMetrics || null,
+      unavailableFields: report.unavailableFields || [],
+      fieldLimitations: report.fieldLimitations || [],
       report,
       reportId: report.reportId,
       reportPath: report.reportPath || '',
@@ -396,6 +669,7 @@ export class PressureTestService {
     const session = await this.workspaceService.readSession(sessionId);
     const authOverride = await this.workspaceService.readAuthOverride(sessionId);
     const config = this.buildConfig(options);
+    const monitoring = this.buildMonitoring(options.monitoring || {});
     const { mode, targets, weightedTargets } = this.buildTargets(session, authOverride, options);
     const jobId = createPressureJobId();
     const job = {
@@ -403,6 +677,7 @@ export class PressureTestService {
       sessionId,
       status: 'running',
       config,
+      monitoring,
       authMode: mode,
       authOverride,
       targets: targets.map(({ request, ...target }) => target),
@@ -415,6 +690,9 @@ export class PressureTestService {
       samples: [],
       errors: [],
       timeline: new Map(),
+      resourceMetrics: null,
+      unavailableFields: [],
+      fieldLimitations: [],
       report: null,
       reportId: null,
       reportPath: null,
@@ -520,8 +798,10 @@ export class PressureTestService {
   async executeTarget(job, target, sequence, startedMs) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), job.config.timeoutMs);
-    const startedAt = new Date().toISOString();
     const requestStarted = Date.now();
+    const startedAt = new Date(requestStarted).toISOString();
+    const label = `${target.method} ${target.pressureUrl || target.originalUrl || target.id}`;
+    const sentBytes = estimateSentBytes(target.request);
     try {
       const response = await fetch(target.request.url, {
         method: target.request.method,
@@ -530,6 +810,16 @@ export class PressureTestService {
         redirect: 'manual',
         signal: controller.signal,
       });
+      const responseHeadersAt = Date.now();
+      const responseHeaders = responseHeadersObject(response.headers);
+      const bodyBuffer = Buffer.from(await response.arrayBuffer());
+      const finishedAtMs = Date.now();
+      const responseText = bodyBuffer.toString('utf8');
+      const businessFields = extractBusinessFields(responseText, responseHeaders);
+      const elapsed = finishedAtMs - requestStarted;
+      const latency = responseHeadersAt - requestStarted;
+      const responseMessage = response.statusText || '';
+      const failureMessage = response.ok ? '' : (businessFields.bizMessage || responseMessage || `HTTP ${response.status}`);
       const result = {
         sequence,
         requestId: target.id,
@@ -537,12 +827,32 @@ export class PressureTestService {
         url: target.request.url,
         ok: response.ok,
         status: response.status,
-        durationMs: Date.now() - requestStarted,
+        durationMs: elapsed,
         startedAt,
-        finishedAt: new Date().toISOString(),
+        finishedAt: new Date(finishedAtMs).toISOString(),
+        timeStamp: requestStarted,
+        elapsed,
+        label,
+        success: response.ok,
+        responseCode: String(response.status),
+        responseMessage,
+        failureMessage,
+        URL: target.request.url,
+        allThreads: job.config.concurrency,
+        grpThreads: job.config.concurrency,
+        Latency: latency,
+        Connect: 0,
+        bytes: bodyBuffer.length,
+        sentBytes,
+        latencyMs: latency,
+        connectMs: 0,
+        ...businessFields,
       };
       this.recordResult(job, target, result, startedMs);
     } catch (error) {
+      const finishedAtMs = Date.now();
+      const elapsed = finishedAtMs - requestStarted;
+      const errorMessage = error.name === 'AbortError' ? `请求超时 ${job.config.timeoutMs}ms` : error.message;
       const result = {
         sequence,
         requestId: target.id,
@@ -550,10 +860,30 @@ export class PressureTestService {
         url: target.request.url,
         ok: false,
         status: 0,
-        durationMs: Date.now() - requestStarted,
+        durationMs: elapsed,
         startedAt,
-        finishedAt: new Date().toISOString(),
-        error: error.name === 'AbortError' ? `请求超时 ${job.config.timeoutMs}ms` : error.message,
+        finishedAt: new Date(finishedAtMs).toISOString(),
+        error: errorMessage,
+        timeStamp: requestStarted,
+        elapsed,
+        label,
+        success: false,
+        responseCode: '0',
+        responseMessage: error.name || 'Error',
+        failureMessage: errorMessage,
+        URL: target.request.url,
+        allThreads: job.config.concurrency,
+        grpThreads: job.config.concurrency,
+        Latency: elapsed,
+        Connect: 0,
+        bytes: 0,
+        sentBytes,
+        latencyMs: elapsed,
+        connectMs: 0,
+        bizCode: '',
+        bizMessage: '',
+        traceId: '',
+        errorType: error.name || 'Error',
       };
       this.recordResult(job, target, result, startedMs);
     } finally {
@@ -582,13 +912,190 @@ export class PressureTestService {
     }
   }
 
+  unavailableResourceFields(reason) {
+    return RESOURCE_METRIC_KEYS.map((key) => ({
+      field: RESOURCE_METRIC_DEFINITIONS[key].label,
+      key,
+      reason,
+    }));
+  }
+
+  buildFieldLimitations(monitoring, resourceMetrics = null) {
+    const limitations = [
+      {
+        field: 'JTL Connect',
+        key: 'Connect',
+        reason: 'Node fetch 不暴露 DNS/TCP/TLS 建连耗时，报告中填 0。',
+      },
+      {
+        field: 'JTL Latency',
+        key: 'Latency',
+        reason: '使用“请求发出到响应头返回”的耗时，不能拆分服务端首字节和网络传输细节。',
+      },
+      {
+        field: 'JTL 样本数量',
+        key: 'jtlSamples',
+        reason: `报告内沿用最近 ${MAX_SAMPLES} 条样本限制，未生成全量 JTL 文件。`,
+      },
+    ];
+    if (!monitoring?.enabled) {
+      limitations.push({
+        field: '资源监控',
+        key: 'resourceMetrics',
+        reason: '未启用 Prometheus 监控，无法从普通 HTTP 响应推断被测服务资源指标。',
+      });
+      return limitations;
+    }
+    if (!monitoring.prometheusUrl) {
+      limitations.push({
+        field: '资源监控',
+        key: 'resourceMetrics',
+        reason: '已启用 Prometheus 监控，但未配置 Prometheus URL。',
+      });
+      return limitations;
+    }
+    Object.entries(resourceMetrics?.metrics || {}).forEach(([key, metric]) => {
+      if (metric.status !== 'ok') {
+        limitations.push({
+          field: RESOURCE_METRIC_DEFINITIONS[key]?.label || key,
+          key,
+          reason: metric.reason || 'Prometheus 未返回可用数据。',
+        });
+      }
+    });
+    return limitations;
+  }
+
+  async queryPrometheusRange(prometheusUrl, query, startMs, endMs, stepSeconds) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROMETHEUS_TIMEOUT_MS);
+    try {
+      const params = new URLSearchParams({
+        query,
+        start: String(Math.floor(startMs / 1000)),
+        end: String(Math.ceil(endMs / 1000)),
+        step: `${stepSeconds}s`,
+      });
+      const url = `${prometheusUrl.replace(/\/+$/, '')}/api/v1/query_range?${params.toString()}`;
+      const response = await fetch(url, { signal: controller.signal });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.status !== 'success') {
+        throw new Error(data.error || `Prometheus 查询失败: ${response.status}`);
+      }
+      return data.data?.result || [];
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async collectPrometheusMetric(monitoring, key, startMs, endMs) {
+    const definition = RESOURCE_METRIC_DEFINITIONS[key];
+    const query = monitoring.queries[key] || definition.query;
+    try {
+      const series = await this.queryPrometheusRange(
+        monitoring.prometheusUrl,
+        query,
+        startMs,
+        endMs,
+        monitoring.stepSeconds
+      );
+      const samples = aggregatePrometheusValues(series, definition.aggregation);
+      if (!samples.length) {
+        return {
+          ...definition,
+          key,
+          query,
+          status: 'unavailable',
+          reason: 'Prometheus 查询成功，但没有返回时间序列数据。',
+          samples: [],
+          summary: summarizeValues([]),
+          seriesCount: series.length,
+        };
+      }
+      return {
+        ...definition,
+        key,
+        query,
+        status: 'ok',
+        reason: '',
+        samples,
+        summary: summarizeValues(samples),
+        seriesCount: series.length,
+      };
+    } catch (error) {
+      return {
+        ...definition,
+        key,
+        query,
+        status: 'unavailable',
+        reason: error.name === 'AbortError' ? `Prometheus 查询超时 ${PROMETHEUS_TIMEOUT_MS}ms` : error.message,
+        samples: [],
+        summary: summarizeValues([]),
+        seriesCount: 0,
+      };
+    }
+  }
+
+  async collectResourceMetrics(job) {
+    const monitoring = job.monitoring || this.buildMonitoring();
+    const base = {
+      provider: monitoring.provider,
+      enabled: monitoring.enabled,
+      source: monitoring.prometheusUrl || '',
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+      stepSeconds: monitoring.stepSeconds,
+      metrics: {},
+      status: 'unavailable',
+      reason: '',
+    };
+    if (!monitoring.enabled) {
+      return {
+        ...base,
+        reason: '未启用 Prometheus 监控。',
+        unavailableFields: this.unavailableResourceFields('未启用 Prometheus 监控。'),
+      };
+    }
+    if (!monitoring.prometheusUrl) {
+      return {
+        ...base,
+        reason: '未配置 Prometheus URL。',
+        unavailableFields: this.unavailableResourceFields('未配置 Prometheus URL。'),
+      };
+    }
+    const startMs = new Date(job.startedAt).getTime();
+    const endMs = new Date(job.finishedAt || new Date().toISOString()).getTime();
+    const metricEntries = await Promise.all(
+      RESOURCE_METRIC_KEYS.map(async (key) => [key, await this.collectPrometheusMetric(monitoring, key, startMs, endMs)])
+    );
+    const metrics = Object.fromEntries(metricEntries);
+    const unavailableFields = metricEntries
+      .filter(([, metric]) => metric.status !== 'ok')
+      .map(([key, metric]) => ({
+        field: RESOURCE_METRIC_DEFINITIONS[key].label,
+        key,
+        reason: metric.reason || 'Prometheus 未返回可用数据。',
+      }));
+    return {
+      ...base,
+      metrics,
+      status: unavailableFields.length ? 'partial' : 'ok',
+      reason: unavailableFields.length ? '部分资源指标不可用。' : '',
+      unavailableFields,
+    };
+  }
+
   async writeReport(job) {
     const { summary, interfaces } = reportSummary(job, job.finishedAt);
+    const resourceMetrics = await this.collectResourceMetrics(job);
+    const unavailableFields = resourceMetrics.unavailableFields || [];
+    const fieldLimitations = this.buildFieldLimitations(job.monitoring, resourceMetrics);
     const report = {
       reportId: job.jobId,
       sessionId: job.sessionId,
       status: job.status,
       config: job.config,
+      monitoring: job.monitoring,
       authMode: job.authMode,
       authOverride: job.authOverride,
       targets: job.targets,
@@ -597,10 +1104,17 @@ export class PressureTestService {
       summary,
       interfaces,
       samples: job.samples,
+      jtlSamples: job.samples.map((sample) => jtlFieldsFromResult(sample, job.config)),
       errors: job.errors,
       timeline: [...job.timeline.values()].sort((first, second) => first.second - second.second),
+      resourceMetrics,
+      unavailableFields,
+      fieldLimitations,
       error: job.error || '',
     };
+    job.resourceMetrics = resourceMetrics;
+    job.unavailableFields = unavailableFields;
+    job.fieldLimitations = fieldLimitations;
     const reportFile = await this.workspaceService.writePressureReport(job.sessionId, report);
     return { ...report, ...reportFile };
   }
