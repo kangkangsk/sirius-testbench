@@ -10,6 +10,13 @@ const DEFAULT_PRESSURE_CONFIG = {
     timeoutMs: 10000,
     requestIntervalMs: 0,
   },
+  monitoring: {
+    enabled: false,
+    provider: 'prometheus',
+    prometheusUrl: '',
+    stepSeconds: 15,
+    queries: {},
+  },
   selectedRequestIds: [],
   targets: [],
   updatedAt: null,
@@ -349,6 +356,58 @@ export class WorkspaceService {
     return { meta, requests, resources: session.resources };
   }
 
+  normalizeBatchTrafficBody(body = {}) {
+    const rawTrafficType = body.trafficType || 'http';
+    const trafficType = ['http', 'static', 'all'].includes(rawTrafficType) ? rawTrafficType : 'http';
+    const rawIds = Array.isArray(body.ids) ? body.ids.map((id) => String(id)).filter(Boolean) : null;
+    const patch = body.patch && typeof body.patch === 'object' && !Array.isArray(body.patch) ? body.patch : {};
+
+    return {
+      action: body.action === 'delete' || body.delete === true ? 'delete' : 'patch',
+      ids: rawIds ? new Set(rawIds) : null,
+      methods: new Set(body.methods || []),
+      patch,
+      trafficType,
+    };
+  }
+
+  matchesBatchTrafficItem(item, options) {
+    const itemTrafficType = this.classifyTraffic(item);
+    if (options.trafficType !== 'all' && itemTrafficType !== options.trafficType) {
+      return false;
+    }
+    if (options.ids) {
+      return options.ids.has(String(item.id));
+    }
+    if (options.methods.size) {
+      return options.methods.has(item.method);
+    }
+    return true;
+  }
+
+  applyBatchTrafficOperation(entries, body) {
+    const options = this.normalizeBatchTrafficBody(body);
+    const now = new Date().toISOString();
+    let deletedCount = 0;
+    let updatedCount = 0;
+
+    const nextEntries = entries.reduce((result, item) => {
+      if (!this.matchesBatchTrafficItem(item, options)) {
+        result.push(item);
+        return result;
+      }
+      if (options.action === 'delete') {
+        deletedCount += 1;
+        return result;
+      }
+      updatedCount += 1;
+      result.push({ ...item, ...options.patch, updatedAt: now });
+      return result;
+    }, []);
+
+    return { deletedCount, entries: nextEntries, updatedCount };
+  }
+
   async deleteSession(sessionId) {
     const workspacePath = await this.ensureWorkspace();
     const normalizedSessionId = this.assertSafeSessionId(sessionId);
@@ -360,16 +419,13 @@ export class WorkspaceService {
 
   async batchPatchRequests(sessionId, body) {
     const session = await this.readSession(sessionId);
-    const methods = new Set(body.methods || []);
-    const patch = body.patch || {};
-    const requests = session.requests.map((item) => {
-      if (!methods.size || methods.has(item.method)) {
-        return { ...item, ...patch, updatedAt: new Date().toISOString() };
-      }
-      return item;
-    });
-    const meta = await this.writeSessionReviewSnapshot(sessionId, session.meta, [...requests, ...session.resources]);
-    return { meta, requests, resources: session.resources };
+    const batchResult = this.applyBatchTrafficOperation([...session.requests, ...session.resources], body);
+    const meta = await this.writeSessionReviewSnapshot(sessionId, session.meta, batchResult.entries);
+    return {
+      ...this.buildSessionPayload(meta, batchResult.entries),
+      deletedCount: batchResult.deletedCount,
+      updatedCount: batchResult.updatedCount,
+    };
   }
 
   async readAuthOverride(sessionId) {
@@ -443,6 +499,17 @@ export class WorkspaceService {
         maxRequests: numberOr(config.maxRequests, DEFAULT_PRESSURE_CONFIG.config.maxRequests),
         timeoutMs: numberOr(config.timeoutMs, DEFAULT_PRESSURE_CONFIG.config.timeoutMs),
         requestIntervalMs: numberOr(config.requestIntervalMs, DEFAULT_PRESSURE_CONFIG.config.requestIntervalMs),
+      },
+      monitoring: {
+        ...DEFAULT_PRESSURE_CONFIG.monitoring,
+        ...(data.monitoring || {}),
+        provider: data.monitoring?.provider === 'prometheus' ? 'prometheus' : 'prometheus',
+        enabled: data.monitoring?.enabled === true,
+        prometheusUrl: String(data.monitoring?.prometheusUrl || ''),
+        stepSeconds: numberOr(data.monitoring?.stepSeconds, DEFAULT_PRESSURE_CONFIG.monitoring.stepSeconds),
+        queries: data.monitoring?.queries && typeof data.monitoring.queries === 'object'
+          ? data.monitoring.queries
+          : {},
       },
       selectedRequestIds: selectedRequestIds.map((id) => String(id)),
       targets: targets

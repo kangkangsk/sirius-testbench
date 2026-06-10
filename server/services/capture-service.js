@@ -225,19 +225,15 @@ export class CaptureService {
     if (!active) {
       return this.workspaceService.batchPatchRequests(sessionId, body);
     }
-    const methods = new Set(body.methods || []);
-    const patch = body.patch || {};
-    active.requests.forEach((request) => {
-      if (this.workspaceService.classifyTraffic(request) !== 'http') {
-        return;
-      }
-      if (!methods.size || methods.has(request.method)) {
-        Object.assign(request, patch, { updatedAt: new Date().toISOString() });
-      }
-    });
+    const batchResult = this.workspaceService.applyBatchTrafficOperation(active.requests, body);
+    active.requests.splice(0, active.requests.length, ...batchResult.entries);
     const meta = await this.workspaceService.writeSessionReviewSnapshot(sessionId, active.meta, active.requests);
     active.meta = meta;
-    return this.workspaceService.buildSessionPayload(meta, active.requests);
+    return {
+      ...this.workspaceService.buildSessionPayload(meta, active.requests),
+      deletedCount: batchResult.deletedCount,
+      updatedCount: batchResult.updatedCount,
+    };
   }
 
   async start(body) {

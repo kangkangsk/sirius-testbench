@@ -72,8 +72,48 @@
       <PageSectionHeader title="请求清单" description="HTTP 请求可启用、禁用、删除和回放；静态资源页面单独查看，不参与回放。" />
       <a-tabs v-model:activeKey="trafficTab" class="traffic-tabs">
         <a-tab-pane key="http" :tab="`HTTP 请求 (${filteredRequests.length})`">
+          <div class="batch-toolbar">
+            <a-space wrap>
+              <a-button size="small" :disabled="!filteredRequests.length" @click="selectFilteredRequests">
+                <template #icon><CheckCircleOutlined /></template>
+                选中筛选结果
+              </a-button>
+              <a-button size="small" :disabled="!selectedHttpRowKeys.length" @click="clearHttpSelection">
+                <template #icon><StopOutlined /></template>
+                清空选择
+              </a-button>
+              <a-button size="small" :disabled="!selectedHttpRowKeys.length" @click="batchEnableSelectedRequests">
+                <template #icon><CheckCircleOutlined /></template>
+                启用
+              </a-button>
+              <a-button size="small" :disabled="!selectedHttpRowKeys.length" @click="batchDisableSelectedRequests">
+                <template #icon><StopOutlined /></template>
+                禁用
+              </a-button>
+              <a-dropdown :disabled="!selectedHttpRowKeys.length">
+                <a-button size="small">
+                  <template #icon><EditOutlined /></template>
+                  分类
+                  <DownOutlined />
+                </a-button>
+                <template #overlay>
+                  <a-menu @click="batchSetSelectedCategory">
+                    <a-menu-item v-for="option in categoryEditOptions" :key="option.value">
+                      {{ option.label }}
+                    </a-menu-item>
+                  </a-menu>
+                </template>
+              </a-dropdown>
+              <a-button size="small" danger :disabled="!selectedHttpRowKeys.length" @click="confirmBatchDeleteRequests">
+                <template #icon><DeleteOutlined /></template>
+                删除
+              </a-button>
+            </a-space>
+            <span class="batch-toolbar__count">已选 {{ selectedHttpRowKeys.length }}</span>
+          </div>
           <a-table
             row-key="id"
+            :row-selection="httpRowSelection"
             :columns="columns"
             :data-source="filteredRequests"
             :pagination="{ pageSize: 10 }"
@@ -130,8 +170,31 @@
           </a-table>
         </a-tab-pane>
         <a-tab-pane key="static" :tab="`静态资源页面 (${filteredResources.length})`">
+          <div class="batch-toolbar">
+            <a-space wrap>
+              <a-button size="small" :disabled="!filteredResources.length" @click="selectFilteredResources">
+                <template #icon><CheckCircleOutlined /></template>
+                选中筛选结果
+              </a-button>
+              <a-button size="small" :disabled="!selectedResourceRowKeys.length" @click="clearResourceSelection">
+                <template #icon><StopOutlined /></template>
+                清空选择
+              </a-button>
+              <a-button
+                size="small"
+                danger
+                :disabled="!selectedResourceRowKeys.length"
+                @click="confirmBatchDeleteResources"
+              >
+                <template #icon><DeleteOutlined /></template>
+                删除
+              </a-button>
+            </a-space>
+            <span class="batch-toolbar__count">已选 {{ selectedResourceRowKeys.length }}</span>
+          </div>
           <a-table
             row-key="id"
+            :row-selection="resourceRowSelection"
             :columns="resourceColumns"
             :data-source="filteredResources"
             :pagination="{ pageSize: 10 }"
@@ -169,6 +232,8 @@ import { Modal, message } from 'ant-design-vue';
 import {
   ApiOutlined,
   CheckCircleOutlined,
+  DeleteOutlined,
+  DownOutlined,
   EditOutlined,
   FileImageOutlined,
   ReloadOutlined,
@@ -198,6 +263,8 @@ const currentSession = ref({ meta: null, requests: [], resources: [] });
 const trafficTab = ref('http');
 const detailOpen = ref(false);
 const detailRequest = ref(null);
+const selectedHttpRowKeys = ref([]);
+const selectedResourceRowKeys = ref([]);
 const filters = reactive({
   method: 'all',
   category: 'all',
@@ -310,6 +377,41 @@ const filteredResources = computed(() =>
     return methodMatched && statusMatched && keywordMatched;
   })
 );
+const httpRowSelection = computed(() => ({
+  preserveSelectedRowKeys: true,
+  selectedRowKeys: selectedHttpRowKeys.value,
+  onChange: (keys) => {
+    selectedHttpRowKeys.value = keys;
+  },
+}));
+const resourceRowSelection = computed(() => ({
+  preserveSelectedRowKeys: true,
+  selectedRowKeys: selectedResourceRowKeys.value,
+  onChange: (keys) => {
+    selectedResourceRowKeys.value = keys;
+  },
+}));
+
+const clearHttpSelection = () => {
+  selectedHttpRowKeys.value = [];
+};
+
+const clearResourceSelection = () => {
+  selectedResourceRowKeys.value = [];
+};
+
+const clearSelections = () => {
+  clearHttpSelection();
+  clearResourceSelection();
+};
+
+const selectFilteredRequests = () => {
+  selectedHttpRowKeys.value = filteredRequests.value.map((request) => request.id);
+};
+
+const selectFilteredResources = () => {
+  selectedResourceRowKeys.value = filteredResources.value.map((request) => request.id);
+};
 
 const loadSessions = async () => {
   sessions.value = await listSessions();
@@ -321,9 +423,11 @@ const loadSessions = async () => {
 const loadSelectedSession = async () => {
   if (!selectedSessionId.value) {
     currentSession.value = { meta: null, requests: [], resources: [] };
+    clearSelections();
     return;
   }
   currentSession.value = await getSession(selectedSessionId.value);
+  clearSelections();
 };
 
 const applyLocalRequestPatch = (requestId, patch) => {
@@ -345,6 +449,113 @@ const updateRequest = async (record, patch) => {
     applyLocalRequestPatch(record.id, before);
     message.error(error.message || '请求更新失败');
   }
+};
+
+const applyLocalBatchPatch = (trafficType, ids, patch) => {
+  const idSet = new Set(ids.map((id) => String(id)));
+  const key = trafficType === 'static' ? 'resources' : 'requests';
+  currentSession.value = {
+    ...currentSession.value,
+    [key]: (currentSession.value[key] || []).map((request) =>
+      idSet.has(String(request.id)) ? { ...request, ...patch, updatedAt: new Date().toISOString() } : request
+    ),
+  };
+};
+
+const applyLocalBatchDelete = (trafficType, ids) => {
+  const idSet = new Set(ids.map((id) => String(id)));
+  const key = trafficType === 'static' ? 'resources' : 'requests';
+  currentSession.value = {
+    ...currentSession.value,
+    [key]: (currentSession.value[key] || []).filter((request) => !idSet.has(String(request.id))),
+  };
+};
+
+const batchPatchSelectedRequests = async (patch, successText) => {
+  if (!selectedSessionId.value || !selectedHttpRowKeys.value.length) {
+    return;
+  }
+  const ids = [...selectedHttpRowKeys.value];
+  const before = currentSession.value;
+  applyLocalBatchPatch('http', ids, patch);
+  try {
+    const result = await batchPatchRequests(selectedSessionId.value, {
+      trafficType: 'http',
+      ids,
+      patch,
+    });
+    currentSession.value = result;
+    clearHttpSelection();
+    message.success(successText);
+  } catch (error) {
+    currentSession.value = before;
+    message.error(error.message || '批量更新失败');
+  }
+};
+
+const batchEnableSelectedRequests = () => {
+  batchPatchSelectedRequests({ enabled: true }, '已启用所选请求');
+};
+
+const batchDisableSelectedRequests = () => {
+  batchPatchSelectedRequests({ enabled: false }, '已禁用所选请求');
+};
+
+const batchSetSelectedCategory = ({ key }) => {
+  batchPatchSelectedRequests({ category: key }, '已更新所选请求分类');
+};
+
+const batchDeleteSelection = async (trafficType) => {
+  const isStatic = trafficType === 'static';
+  const ids = isStatic ? [...selectedResourceRowKeys.value] : [...selectedHttpRowKeys.value];
+  if (!selectedSessionId.value || !ids.length) {
+    return;
+  }
+  const before = currentSession.value;
+  applyLocalBatchDelete(trafficType, ids);
+  try {
+    const result = await batchPatchRequests(selectedSessionId.value, {
+      action: 'delete',
+      trafficType,
+      ids,
+    });
+    currentSession.value = result;
+    if (isStatic) {
+      clearResourceSelection();
+    } else {
+      clearHttpSelection();
+    }
+    message.success(`已删除 ${ids.length} 条${isStatic ? '静态资源' : 'HTTP 请求'}`);
+  } catch (error) {
+    currentSession.value = before;
+    message.error(error.message || '批量删除失败');
+  }
+};
+
+const confirmBatchDelete = (trafficType) => {
+  const isStatic = trafficType === 'static';
+  const count = isStatic ? selectedResourceRowKeys.value.length : selectedHttpRowKeys.value.length;
+  if (!count) {
+    return;
+  }
+  Modal.confirm({
+    title: `确认删除选中的 ${count} 条${isStatic ? '静态资源' : 'HTTP 请求'}？`,
+    content: '删除后会同步更新当前会话文件。',
+    okText: '删除',
+    okType: 'danger',
+    cancelText: '取消',
+    async onOk() {
+      await batchDeleteSelection(trafficType);
+    },
+  });
+};
+
+const confirmBatchDeleteRequests = () => {
+  confirmBatchDelete('http');
+};
+
+const confirmBatchDeleteResources = () => {
+  confirmBatchDelete('static');
 };
 
 const confirmDelete = (record) => {

@@ -62,6 +62,32 @@
             @change="autoSavePressureConfig"
           />
         </a-form-item>
+        <a-form-item label="资源监控">
+          <a-switch
+            v-model:checked="monitoring.enabled"
+            checked-children="Prometheus"
+            un-checked-children="关闭"
+            @change="autoSavePressureConfig"
+          />
+        </a-form-item>
+        <a-form-item label="Prometheus URL">
+          <a-input
+            v-model:value="monitoring.prometheusUrl"
+            :disabled="!monitoring.enabled"
+            placeholder="http://localhost:9090"
+            @change="autoSavePressureConfig"
+          />
+        </a-form-item>
+        <a-form-item label="监控步长 s">
+          <a-input-number
+            v-model:value="monitoring.stepSeconds"
+            class="full-width"
+            :disabled="!monitoring.enabled"
+            :min="1"
+            :max="3600"
+            @change="autoSavePressureConfig"
+          />
+        </a-form-item>
       </div>
       <a-space wrap>
         <a-button type="primary" :disabled="!selectedSessionId" @click="saveTargets">
@@ -82,6 +108,29 @@
           />
         </template>
       </PageSectionHeader>
+      <div class="batch-toolbar">
+        <a-space wrap>
+          <a-button
+            type="primary"
+            size="small"
+            :disabled="!selectedRequestIds.length"
+            @click="batchAddSelectedRequests"
+          >
+            <template #icon><PlusOutlined /></template>
+            批量加入压测
+          </a-button>
+          <a-button size="small" :disabled="!filteredRequests.length" @click="batchAddFilteredRequests">
+            <template #icon><PlusOutlined /></template>
+            加入筛选结果
+          </a-button>
+          <a-button size="small" :disabled="!selectedRequestIds.length" @click="clearSelectedRequests">
+            清空选择
+          </a-button>
+        </a-space>
+        <span class="batch-toolbar__count">
+          已选 {{ selectedRequestIds.length }} / 目标 {{ targets.length }}
+        </span>
+      </div>
       <a-table
         row-key="id"
         :columns="requestColumns"
@@ -127,11 +176,29 @@
     <a-card class="table-card">
       <PageSectionHeader title="压测目标配置" description="保存后可调整接口权重；权重越高，在压测流量中出现越频繁。" />
       <div class="pressure-config-summary">{{ configSummaryText }}</div>
+      <div class="batch-toolbar">
+        <a-space wrap>
+          <a-button
+            size="small"
+            danger
+            :disabled="!selectedTargetIds.length"
+            @click="batchRemoveTargets"
+          >
+            <template #icon><DeleteOutlined /></template>
+            批量移除
+          </a-button>
+          <a-button size="small" :disabled="!selectedTargetIds.length" @click="clearSelectedTargets">
+            清空选择
+          </a-button>
+        </a-space>
+        <span class="batch-toolbar__count">已选 {{ selectedTargetIds.length }}</span>
+      </div>
       <a-table
         row-key="requestId"
         :columns="targetColumns"
         :data-source="targetRows"
-        :pagination="false"
+        :pagination="{ pageSize: 8 }"
+        :row-selection="{ selectedRowKeys: selectedTargetIds, onChange: onTargetSelect }"
         :scroll="{ x: 1480 }"
       >
         <template #bodyCell="{ column, record }">
@@ -241,7 +308,7 @@
           </template>
           <template v-else-if="column.key === 'action'">
             <a-space>
-              <a-button type="link" @click="selectTest(record)">查看</a-button>
+              <a-button type="link" @click="selectTest(record)">查看详情</a-button>
               <a-button v-if="record.status === 'running'" type="link" danger @click="stopTest(record)">停止</a-button>
               <a-button type="link" danger @click="confirmDeleteTest(record)">删除</a-button>
             </a-space>
@@ -297,6 +364,75 @@
         </template>
       </a-table>
     </a-card>
+
+    <a-card v-if="pressureJob" class="table-card">
+      <PageSectionHeader title="JTL / 业务字段样本" description="样本包含 JMeter JTL 字段和响应中提取的业务字段。" />
+      <a-table
+        row-key="sequence"
+        :columns="sampleColumns"
+        :data-source="pressureSamples"
+        :pagination="{ pageSize: 8 }"
+        :locale="{ emptyText: sampleEmptyText }"
+        :scroll="{ x: 2200 }"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'success'">
+            <a-tag :color="record.success ? 'success' : 'error'">{{ record.success ? 'true' : 'false' }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'URL'">
+            <a-tooltip :title="record.URL">
+              <span class="url-text">{{ displayUrl(record.URL) }}</span>
+            </a-tooltip>
+          </template>
+          <template v-else-if="column.key === 'failureMessage'">
+            <a-tooltip :title="record.failureMessage">
+              <span class="url-text">{{ record.failureMessage || '-' }}</span>
+            </a-tooltip>
+          </template>
+        </template>
+      </a-table>
+    </a-card>
+
+    <a-card v-if="pressureJob && resourceMonitoringVisible" class="table-card">
+      <PageSectionHeader title="资源监控" description="当前接入 Prometheus query_range；未配置或查询失败的字段会在下方说明。" />
+      <a-descriptions bordered size="small" :column="1" class="replay-progress-detail">
+        <a-descriptions-item label="状态">{{ resourceMetricStatusText }}</a-descriptions-item>
+        <a-descriptions-item label="来源">{{ pressureJob.resourceMetrics?.source || '-' }}</a-descriptions-item>
+      </a-descriptions>
+      <a-table
+        row-key="key"
+        :columns="resourceMetricColumns"
+        :data-source="resourceMetricRows"
+        :pagination="{ pageSize: 8 }"
+        :scroll="{ x: 1180 }"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'status'">
+            <a-tag :color="record.status === 'ok' ? 'success' : 'warning'">{{ record.status }}</a-tag>
+          </template>
+          <template v-else-if="column.key === 'query'">
+            <a-tooltip :title="record.query">
+              <span class="url-text">{{ record.query || '-' }}</span>
+            </a-tooltip>
+          </template>
+          <template v-else-if="column.key === 'reason'">
+            <a-tooltip :title="record.reason">
+              <span class="url-text">{{ record.reason || '-' }}</span>
+            </a-tooltip>
+          </template>
+        </template>
+      </a-table>
+    </a-card>
+
+    <a-card v-if="pressureJob && fieldLimitationRows.length" class="table-card">
+      <PageSectionHeader title="不可行字段说明" description="无法直接或精确采集的字段会保留原因，避免报告误读。" />
+      <a-table
+        row-key="key"
+        :columns="limitationColumns"
+        :data-source="fieldLimitationRows"
+        :pagination="{ pageSize: 8 }"
+      />
+    </a-card>
   </div>
 </template>
 
@@ -343,6 +479,7 @@ const currentSession = ref({ meta: null, requests: [] });
 const authOverride = ref(createEmptyAuthOverride());
 const requestKeyword = ref('');
 const selectedRequestIds = ref([]);
+const selectedTargetIds = ref([]);
 const targets = ref([]);
 const tests = ref([]);
 const selectedTestId = ref(null);
@@ -357,6 +494,13 @@ const config = reactive({
   maxRequests: 0,
   timeoutMs: 10000,
   requestIntervalMs: 0,
+});
+const monitoring = reactive({
+  enabled: false,
+  provider: 'prometheus',
+  prometheusUrl: '',
+  stepSeconds: 15,
+  queries: {},
 });
 
 const numberOr = (value, fallback) => {
@@ -439,6 +583,43 @@ const interfaceColumns = [
   { title: 'P99', dataIndex: 'p99DurationMs', key: 'p99DurationMs', width: 90 },
 ];
 
+const sampleColumns = [
+  { title: 'timeStamp', dataIndex: 'timeStamp', key: 'timeStamp', width: 150 },
+  { title: 'elapsed', dataIndex: 'elapsed', key: 'elapsed', width: 90 },
+  { title: 'label', dataIndex: 'label', key: 'label', ellipsis: true, width: 220 },
+  { title: 'success', key: 'success', width: 90 },
+  { title: 'responseCode', dataIndex: 'responseCode', key: 'responseCode', width: 120 },
+  { title: 'responseMessage', dataIndex: 'responseMessage', key: 'responseMessage', width: 160 },
+  { title: 'failureMessage', key: 'failureMessage', width: 180 },
+  { title: 'URL', key: 'URL', width: 300 },
+  { title: 'allThreads', dataIndex: 'allThreads', key: 'allThreads', width: 110 },
+  { title: 'grpThreads', dataIndex: 'grpThreads', key: 'grpThreads', width: 110 },
+  { title: 'Latency', dataIndex: 'Latency', key: 'Latency', width: 90 },
+  { title: 'Connect', dataIndex: 'Connect', key: 'Connect', width: 90 },
+  { title: 'bytes', dataIndex: 'bytes', key: 'bytes', width: 90 },
+  { title: 'sentBytes', dataIndex: 'sentBytes', key: 'sentBytes', width: 100 },
+  { title: 'bizCode', dataIndex: 'bizCode', key: 'bizCode', width: 120 },
+  { title: 'bizMessage', dataIndex: 'bizMessage', key: 'bizMessage', width: 160 },
+  { title: 'traceId', dataIndex: 'traceId', key: 'traceId', width: 180 },
+  { title: 'errorType', dataIndex: 'errorType', key: 'errorType', width: 140 },
+];
+
+const resourceMetricColumns = [
+  { title: '指标', dataIndex: 'label', key: 'label', width: 120 },
+  { title: '状态', key: 'status', width: 110 },
+  { title: '单位', dataIndex: 'unit', key: 'unit', width: 90 },
+  { title: '平均', dataIndex: ['summary', 'avg'], key: 'avg', width: 90 },
+  { title: '最大', dataIndex: ['summary', 'max'], key: 'max', width: 90 },
+  { title: '最新', dataIndex: ['summary', 'last'], key: 'last', width: 90 },
+  { title: '查询', key: 'query', width: 360 },
+  { title: '原因', key: 'reason', width: 260 },
+];
+
+const limitationColumns = [
+  { title: '字段', dataIndex: 'field', key: 'field', width: 160 },
+  { title: '原因', dataIndex: 'reason', key: 'reason' },
+];
+
 const sessionOptions = computed(() =>
   sessions.value.map((session) => ({
     value: session.id,
@@ -516,9 +697,107 @@ const pressureInterfaces = computed(() =>
     pressureUrl: item.pressureUrl || item.url,
   }))
 );
+
+const timestampFromSample = (sample) => {
+  const timeStamp = Number(sample.timeStamp);
+  if (Number.isFinite(timeStamp) && timeStamp > 0) {
+    return timeStamp;
+  }
+  const startedAt = new Date(sample.startedAt || 0).getTime();
+  return Number.isFinite(startedAt) ? startedAt : 0;
+};
+
+const normalizePressureSample = (sample, index) => {
+  const elapsed = sample.elapsed ?? sample.durationMs ?? 0;
+  const success = sample.success ?? sample.ok ?? false;
+  const status = sample.responseCode ?? sample.status ?? 0;
+  const url = sample.URL || sample.url || '';
+  const method = sample.method || 'HTTP';
+  const label = sample.label || `${method} ${url}`.trim();
+  const threads = pressureJob.value?.config?.concurrency || sample.allThreads || sample.grpThreads || 0;
+  return {
+    ...sample,
+    sequence: sample.sequence ?? `${sample.requestId || 'sample'}-${index + 1}`,
+    timeStamp: timestampFromSample(sample),
+    elapsed,
+    label,
+    success,
+    responseCode: String(status),
+    responseMessage: sample.responseMessage || sample.error || '',
+    failureMessage: sample.failureMessage || sample.error || (success ? '' : sample.bizMessage || ''),
+    URL: url,
+    allThreads: sample.allThreads ?? threads,
+    grpThreads: sample.grpThreads ?? threads,
+    Latency: sample.Latency ?? sample.latencyMs ?? elapsed,
+    Connect: sample.Connect ?? sample.connectMs ?? 0,
+    bytes: sample.bytes ?? 0,
+    sentBytes: sample.sentBytes ?? 0,
+    bizCode: sample.bizCode || '',
+    bizMessage: sample.bizMessage || '',
+    traceId: sample.traceId || '',
+    errorType: sample.errorType || '',
+  };
+};
+
+const pressureSamples = computed(() => {
+  const samples = pressureJob.value?.samples || [];
+  if (samples.length) {
+    return samples.map(normalizePressureSample);
+  }
+  return (pressureJob.value?.jtlSamples || []).map(normalizePressureSample);
+});
+const sampleEmptyText = computed(() => {
+  if (!pressureJob.value) {
+    return '请先查看一个压力测试报告';
+  }
+  if (['running', 'stopping'].includes(pressureJob.value.status)) {
+    return '压力测试正在运行，尚未产生请求样本';
+  }
+  if ((pressureJob.value.summary?.total || 0) <= 0) {
+    return '该报告没有执行请求，检查压测目标、持续时间、最大请求数和启动错误';
+  }
+  return '该报告没有样本数据；历史报告需重新运行压力测试后才会包含 JTL / 业务字段样本';
+});
+const resourceMetricRows = computed(() =>
+  Object.entries(pressureJob.value?.resourceMetrics?.metrics || {}).map(([key, metric]) => ({
+    key,
+    ...metric,
+  }))
+);
+const resourceMetricStatusText = computed(() => {
+  const metrics = pressureJob.value?.resourceMetrics;
+  if (!metrics) {
+    return '未生成';
+  }
+  if (metrics.status === 'ok') {
+    return '已采集';
+  }
+  if (metrics.status === 'partial') {
+    return '部分可用';
+  }
+  return metrics.reason || '不可用';
+});
+const resourceMonitoringVisible = computed(() => monitoring.enabled === true);
+const fieldLimitationRows = computed(() =>
+  [...(pressureJob.value?.fieldLimitations || []), ...(pressureJob.value?.unavailableFields || [])]
+    .filter((item) => {
+      if (resourceMonitoringVisible.value) {
+        return true;
+      }
+      return item.key !== 'resourceMetrics' && item.field !== '资源监控';
+    })
+    .reduce((rows, item) => {
+      const key = `${item.key || item.field}-${item.reason}`;
+      if (!rows.some((row) => row.key === key)) {
+        rows.push({ key, ...item });
+      }
+      return rows;
+    }, [])
+);
 const configSummaryText = computed(() => {
   const maxRequestsText = Number(config.maxRequests) > 0 ? `${config.maxRequests}` : '不限';
   const authModeText = authOverride.value.mode === 'raw' ? '原样' : '统一替换';
+  const monitorText = monitoring.enabled ? `Prometheus ${monitoring.prometheusUrl || '未配置'}` : '关闭';
   return [
     `当前配置：并发 ${config.concurrency}`,
     `持续 ${config.durationSeconds}s`,
@@ -526,6 +805,7 @@ const configSummaryText = computed(() => {
     `超时 ${config.timeoutMs}ms`,
     `间隔 ${config.requestIntervalMs}ms`,
     `登录态 ${authModeText}`,
+    `资源监控 ${monitorText}`,
     `目标接口 ${enabledTargets.value.length}/${targets.value.length}`,
   ].join(' | ');
 });
@@ -554,6 +834,14 @@ const reportDescription = computed(() =>
     : '展示当前选中压力测试批次的统计结果。'
 );
 
+const monitoringPayload = () => ({
+  enabled: monitoring.enabled === true,
+  provider: 'prometheus',
+  prometheusUrl: monitoring.prometheusUrl || '',
+  stepSeconds: numberOr(monitoring.stepSeconds, 15),
+  queries: monitoring.queries || {},
+});
+
 const pressureConfigPayload = () => ({
   config: {
     concurrency: numberOr(config.concurrency, 5),
@@ -562,6 +850,7 @@ const pressureConfigPayload = () => ({
     timeoutMs: numberOr(config.timeoutMs, 10000),
     requestIntervalMs: numberOr(config.requestIntervalMs, 0),
   },
+  monitoring: monitoringPayload(),
   selectedRequestIds: selectedRequestIds.value,
   targets: targetRows.value.map((target) => ({
     requestId: target.requestId,
@@ -603,6 +892,14 @@ const applyPressureConfig = (pressureConfig = {}) => {
     timeoutMs: numberOr(savedConfig.timeoutMs, 10000),
     requestIntervalMs: numberOr(savedConfig.requestIntervalMs, 0),
   });
+  const savedMonitoring = pressureConfig.monitoring || {};
+  Object.assign(monitoring, {
+    enabled: savedMonitoring.enabled === true,
+    provider: 'prometheus',
+    prometheusUrl: savedMonitoring.prometheusUrl || '',
+    stepSeconds: numberOr(savedMonitoring.stepSeconds, 15),
+    queries: savedMonitoring.queries || {},
+  });
   const requestMap = new Map(requests.value.map((request) => [request.id, request]));
   const savedTargets = Array.isArray(pressureConfig.targets) ? pressureConfig.targets : [];
   targets.value = savedTargets
@@ -618,6 +915,7 @@ const applyPressureConfig = (pressureConfig = {}) => {
   selectedRequestIds.value = selectedIds
     .map((id) => String(id))
     .filter((id) => requestMap.has(id) || targetIds.has(id));
+  selectedTargetIds.value = selectedTargetIds.value.filter((id) => targetIds.has(id));
 };
 
 const loadSessions = async () => {
@@ -675,6 +973,7 @@ const refreshAll = async () => {
 const handleSessionChange = async () => {
   clearPressureTimer();
   selectedRequestIds.value = [];
+  selectedTargetIds.value = [];
   targets.value = [];
   pressureJob.value = null;
   selectedTestId.value = null;
@@ -684,6 +983,10 @@ const handleSessionChange = async () => {
 
 const onRequestSelect = (keys) => {
   selectedRequestIds.value = keys;
+};
+
+const onTargetSelect = (keys) => {
+  selectedTargetIds.value = keys;
 };
 
 const createTargetFromRequest = (request, existing = null) => ({
@@ -713,6 +1016,69 @@ const addRequestToTargets = async (request) => {
   } catch (_error) {}
 };
 
+const batchAddRequestsToTargets = async (requestList, sourceLabel) => {
+  const uniqueRequests = [];
+  const seenRequestIds = new Set();
+  requestList.forEach((request) => {
+    if (!request?.id || seenRequestIds.has(request.id)) {
+      return;
+    }
+    seenRequestIds.add(request.id);
+    uniqueRequests.push(request);
+  });
+  if (!uniqueRequests.length) {
+    message.warning('没有可加入的接口');
+    return;
+  }
+
+  const targetIdSet = new Set(targets.value.map((target) => target.requestId));
+  const selectedIdSet = new Set(selectedRequestIds.value);
+  const nextTargets = [...targets.value];
+  let addedCount = 0;
+
+  uniqueRequests.forEach((request) => {
+    selectedIdSet.add(request.id);
+    if (targetIdSet.has(request.id)) {
+      return;
+    }
+    nextTargets.push(createTargetFromRequest(request));
+    targetIdSet.add(request.id);
+    addedCount += 1;
+  });
+
+  selectedRequestIds.value = [...selectedIdSet];
+  targets.value = nextTargets;
+
+  try {
+    await persistPressureConfig({ silent: true });
+    if (addedCount) {
+      message.success(`${sourceLabel}已加入 ${addedCount} 个压测目标`);
+    } else {
+      message.info(`${sourceLabel}已全部在压测目标中`);
+    }
+  } catch (_error) {}
+};
+
+const batchAddSelectedRequests = () => {
+  const requestMap = new Map(requests.value.map((request) => [request.id, request]));
+  const selectedRequests = selectedRequestIds.value
+    .map((requestId) => requestMap.get(requestId))
+    .filter(Boolean);
+  batchAddRequestsToTargets(selectedRequests, '所选接口');
+};
+
+const batchAddFilteredRequests = () => {
+  batchAddRequestsToTargets(filteredRequests.value, '筛选结果');
+};
+
+const clearSelectedRequests = () => {
+  selectedRequestIds.value = [];
+};
+
+const clearSelectedTargets = () => {
+  selectedTargetIds.value = [];
+};
+
 const saveTargets = async () => {
   const existingTargets = new Map(targets.value.map((target) => [target.requestId, target]));
   const nextTargets = selectedRequestIds.value
@@ -726,6 +1092,9 @@ const saveTargets = async () => {
     })
     .filter(Boolean);
   targets.value = nextTargets;
+  selectedTargetIds.value = selectedTargetIds.value.filter((id) =>
+    nextTargets.some((target) => target.requestId === id)
+  );
   try {
     await persistPressureConfig({ silent: true });
     message.success(`已保存 ${nextTargets.length} 个压测目标`);
@@ -742,7 +1111,21 @@ const updateTarget = (requestId, patch) => {
 const removeTarget = (requestId) => {
   targets.value = targets.value.filter((target) => target.requestId !== requestId);
   selectedRequestIds.value = selectedRequestIds.value.filter((id) => id !== requestId);
+  selectedTargetIds.value = selectedTargetIds.value.filter((id) => id !== requestId);
   autoSavePressureConfig();
+};
+
+const batchRemoveTargets = () => {
+  if (!selectedTargetIds.value.length) {
+    return;
+  }
+  const removeIdSet = new Set(selectedTargetIds.value);
+  const removedCount = targets.value.filter((target) => removeIdSet.has(target.requestId)).length;
+  targets.value = targets.value.filter((target) => !removeIdSet.has(target.requestId));
+  selectedRequestIds.value = selectedRequestIds.value.filter((id) => !removeIdSet.has(id));
+  selectedTargetIds.value = [];
+  autoSavePressureConfig();
+  message.success(`已移除 ${removedCount} 个压测目标`);
 };
 
 const runPressureTest = async () => {
@@ -755,6 +1138,7 @@ const runPressureTest = async () => {
     await persistPressureConfig({ silent: true });
     const job = await startPressureTest(selectedSessionId.value, {
       ...config,
+      monitoring: monitoringPayload(),
       targets: enabledTargets.value,
     });
     pressureJob.value = job;
